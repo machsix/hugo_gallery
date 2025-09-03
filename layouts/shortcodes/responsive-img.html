@@ -1,0 +1,6 @@
+<picture>
+  <source srcset="{{ .Get "src" }}" media="(min-width: 2048px)">
+  <source srcset="{{ .Get "src" }}?w=1200" media="(min-width: 1024px)">
+  <source srcset="{{ .Get "src" }}?w=600" media="(max-width: 1023px)">
+  <img src="{{ .Get "src" }}?w=400" alt="{{ .Get "alt" }}">
+</picture>

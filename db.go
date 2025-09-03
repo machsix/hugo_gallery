@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"log"
 	"time"
+  "os"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -17,8 +18,10 @@ func InitDB(dbPath string) *sql.DB {
 	CREATE TABLE IF NOT EXISTS posts (
 		folder_sha TEXT PRIMARY KEY,
 		post_filename TEXT,
-		category TEXT,
-		created_at TEXT
+		tags TEXT,
+		real_path TEXT,
+		created_at TEXT,
+    n_file INTEGER
 	)`)
 	if err != nil {
 		log.Fatalf("Error creating table: %v", err)
@@ -26,10 +29,12 @@ func InitDB(dbPath string) *sql.DB {
 	return db
 }
 
-func AddPost(db *sql.DB, folderSHA, postFile, category string) error {
+func AddPost(db *sql.DB, folderSHA, postFile, tags, realPath string, nFile int) error {
+  // info, _ := os.Stat(realPath)
+  // modTime := info.ModTime()
 	_, err := db.Exec(
-		"INSERT INTO posts (folder_sha, post_filename, category, created_at) VALUES (?, ?, ?, ?)",
-		folderSHA, postFile, category, time.Now().Format(time.RFC3339),
+		"INSERT OR REPLACE INTO posts (folder_sha, post_filename, tags, real_path, created_at, n_file) VALUES (?, ?, ?, ?, ?, ?)",
+		folderSHA, postFile, tags, realPath, time.Now().Format(time.RFC3339), nFile,
 	)
 	return err
 }
@@ -37,4 +42,48 @@ func AddPost(db *sql.DB, folderSHA, postFile, category string) error {
 func RemovePost(db *sql.DB, folderSHA string) error {
 	_, err := db.Exec("DELETE FROM posts WHERE folder_sha = ?", folderSHA)
 	return err
+}
+
+func GetRealPath(db *sql.DB, folderSHA string) string {
+	var realPath string
+	row := db.QueryRow("SELECT real_path FROM posts WHERE folder_sha = ?", folderSHA)
+	row.Scan(&realPath)
+	return realPath
+}
+
+func UpdateNFile(db *sql.DB, folderSHA string, realPath string, nFile int) error {
+  info, _ := os.Stat(realPath)
+  modTime := info.ModTime()
+	_, err := db.Exec(`
+		UPDATE posts
+		SET n_file = ?
+    SET created_at = ?
+		WHERE folder_sha = ?
+	`, nFile, modTime.Format(time.RFC3339), folderSHA)
+	return err
+}
+
+func GetNFile(db *sql.DB, folderSHA string) int {
+	var nFile int
+	row := db.QueryRow("SELECT n_file FROM posts WHERE folder_sha = ?", folderSHA)
+	row.Scan(&nFile)
+	return nFile
+}
+
+// Load all mappings from SQLite
+func LoadFolderMap(db *sql.DB) map[string]string {
+	fmap := make(map[string]string)
+	rows, err := db.Query("SELECT folder_sha, real_path FROM posts")
+	if err != nil {
+		log.Println("Error loading folder map:", err)
+		return fmap
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sha, path string
+		if err := rows.Scan(&sha, &path); err == nil {
+			fmap[sha] = path
+		}
+	}
+	return fmap
 }
