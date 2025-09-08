@@ -10,7 +10,6 @@ require (
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/mattn/go-sqlite3 v1.14.31
 	github.com/yanyiwu/gojieba v1.4.6
-	golang.org/x/sync v0.17.0
 	gopkg.in/ini.v1 v1.67.0
 )
 

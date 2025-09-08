@@ -19,7 +19,6 @@ import (
 	"context"
 
 	"github.com/disintegration/imaging"
-	"golang.org/x/sync/semaphore"
 )
 
 // ImageCache represents cached image metadata
@@ -29,18 +28,44 @@ type ImageCache struct {
 	CreatedAt    time.Time
 }
 
+// ResizeRequest represents a pending image resize request
+type ResizeRequest struct {
+	OriginalPath string
+	Width        int
+	Context      context.Context
+	Cancel       context.CancelFunc
+}
+
+// Add this type to handle background jobs
+type ResizeJob struct {
+	OriginalPath string
+	Width        int
+	CacheKey     string
+	Done         bool
+	Error        error
+	mutex        sync.RWMutex
+}
+
 // ImageProcessor handles image resizing and caching operations
 type ImageProcessor struct {
-	cacheDir        string
-	expiration      time.Duration
-	cache           map[string]ImageCache
-	mutex           sync.RWMutex
-	cleanupTick     time.Duration
-	cacheFile       string
-	lastSaved       time.Time
-	saveInterval    time.Duration
-	resizeSemaphore *semaphore.Weighted
-	maxConcurrent   int64
+	cacheDir      string
+	expiration    time.Duration
+	cache         map[string]ImageCache
+	mutex         sync.RWMutex
+	cleanupTick   time.Duration
+	cacheFile     string
+	lastSaved     time.Time
+	saveInterval  time.Duration
+	resizeLimit   chan struct{} // Replace resizeSemaphore
+	maxConcurrent int64
+
+	// New fields for active resizes
+	activeResizes   map[string]*ResizeRequest
+	activeResizeMux sync.RWMutex
+
+	// Add these fields to ImageProcessor struct
+	pendingResizes map[string]*ResizeJob
+	pendingMux     sync.RWMutex
 }
 
 // NewImageProcessor creates a new ImageProcessor instance
@@ -52,15 +77,17 @@ func NewImageProcessor(cacheDir string, expiration time.Duration) (*ImageProcess
 	const maxConcurrentResizes = 10 // Limit concurrent resizes
 
 	processor := &ImageProcessor{
-		cacheDir:        cacheDir,
-		expiration:      expiration,
-		cache:           make(map[string]ImageCache),
-		cleanupTick:     10 * time.Minute,
-		cacheFile:       path.Join(cacheDir, "cache.json"),
-		saveInterval:    10 * time.Minute,
-		lastSaved:       time.Now(),
-		resizeSemaphore: semaphore.NewWeighted(maxConcurrentResizes),
-		maxConcurrent:   maxConcurrentResizes,
+		cacheDir:       cacheDir,
+		expiration:     expiration,
+		cache:          make(map[string]ImageCache),
+		cleanupTick:    10 * time.Minute,
+		cacheFile:      path.Join(cacheDir, "cache.json"),
+		saveInterval:   10 * time.Minute,
+		lastSaved:      time.Now(),
+		resizeLimit:    make(chan struct{}, maxConcurrentResizes),
+		maxConcurrent:  maxConcurrentResizes,
+		activeResizes:  make(map[string]*ResizeRequest),
+		pendingResizes: make(map[string]*ResizeJob),
 	}
 
 	// Load cache from file
@@ -176,21 +203,93 @@ func (p *ImageProcessor) loadCache() error {
 	return json.Unmarshal(data, &p.cache)
 }
 
-func (p *ImageProcessor) GetResizedImage(originalPath string, width int) (string, error) {
+func (p *ImageProcessor) startBackgroundResize(originalPath string, width int, cacheKey string) *ResizeJob {
+	p.pendingMux.Lock()
+	if job, exists := p.pendingResizes[cacheKey]; exists {
+		p.pendingMux.Unlock()
+		return job
+	}
+
+	job := &ResizeJob{
+		OriginalPath: originalPath,
+		Width:        width,
+		CacheKey:     cacheKey,
+	}
+	p.pendingResizes[cacheKey] = job
+	p.pendingMux.Unlock()
+
+	go func() {
+		// Wait for a resize slot
+		p.resizeLimit <- struct{}{}
+		defer func() { <-p.resizeLimit }()
+
+		src, err := imaging.Open(originalPath)
+		if err != nil {
+			job.mutex.Lock()
+			job.Error = err
+			job.Done = true
+			job.mutex.Unlock()
+			return
+		}
+
+		bounds := src.Bounds()
+		if width >= bounds.Dx() {
+			job.mutex.Lock()
+			job.Done = true
+			job.mutex.Unlock()
+			return
+		}
+
+		resized := imaging.Resize(src, width, 0, imaging.Lanczos)
+		cachedPath := filepath.Join(p.cacheDir, cacheKey+filepath.Ext(originalPath))
+
+		if err := imaging.Save(resized, cachedPath); err != nil {
+			job.mutex.Lock()
+			job.Error = err
+			job.Done = true
+			job.mutex.Unlock()
+			return
+		}
+
+		p.mutex.Lock()
+		p.cache[cacheKey] = ImageCache{
+			OriginalPath: originalPath,
+			CachedPath:   cachedPath,
+			CreatedAt:    time.Now(),
+		}
+		p.mutex.Unlock()
+
+		job.mutex.Lock()
+		job.Done = true
+		job.mutex.Unlock()
+
+		// Cleanup after some time
+		time.AfterFunc(time.Minute, func() {
+			p.pendingMux.Lock()
+			delete(p.pendingResizes, cacheKey)
+			p.pendingMux.Unlock()
+		})
+	}()
+
+	return job
+}
+
+// GetResizedImage retrieves the resized image path, performing the resize operation if necessary
+func (p *ImageProcessor) GetResizedImage(ctx context.Context, originalPath string, width int) (string, bool, error) {
 	if width == 0 {
-		return originalPath, nil
+		return originalPath, true, nil
 	}
 
 	cacheKey := p.getCacheKey(originalPath, width)
+	cachedPath := filepath.Join(p.cacheDir, cacheKey+filepath.Ext(originalPath))
 
-	// Check cache first
+	// 1. First check in-memory cache
 	p.mutex.RLock()
 	if cache, exists := p.cache[cacheKey]; exists {
 		p.mutex.RUnlock()
 		if time.Since(cache.CreatedAt) < p.expiration {
-			// Verify the cached file still exists
 			if _, err := os.Stat(cache.CachedPath); err == nil {
-				return cache.CachedPath, nil
+				return cache.CachedPath, true, nil
 			}
 			// File doesn't exist, remove from cache
 			p.mutex.Lock()
@@ -201,10 +300,8 @@ func (p *ImageProcessor) GetResizedImage(originalPath string, width int) (string
 		p.mutex.RUnlock()
 	}
 
-	// Check if resized file already exists
-	cachedPath := filepath.Join(p.cacheDir, cacheKey+filepath.Ext(originalPath))
+	// 2. Check if file exists on disk (but wasn't in memory cache)
 	if _, err := os.Stat(cachedPath); err == nil {
-		// File exists, add to cache and return
 		p.mutex.Lock()
 		p.cache[cacheKey] = ImageCache{
 			OriginalPath: originalPath,
@@ -212,46 +309,59 @@ func (p *ImageProcessor) GetResizedImage(originalPath string, width int) (string
 			CreatedAt:    time.Now(),
 		}
 		p.mutex.Unlock()
-		return cachedPath, nil
+		return cachedPath, true, nil
 	}
 
-	// Load original image before acquiring semaphore
-	src, err := imaging.Open(originalPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to open image: %w", err)
+	// 3. Try to acquire resize slot with timeout
+	select {
+	case p.resizeLimit <- struct{}{}:
+		defer func() { <-p.resizeLimit }() // Release on return
+		// Do immediate resize
+
+		// 4. Do the actual resize
+		src, err := imaging.Open(originalPath)
+		if err != nil {
+			return "", false, fmt.Errorf("failed to open image: %w", err)
+		}
+
+		bounds := src.Bounds()
+		if width >= bounds.Dx() {
+			return originalPath, true, nil
+		}
+
+		resized := imaging.Resize(src, width, 0, imaging.Lanczos)
+		if err := imaging.Save(resized, cachedPath); err != nil {
+			return "", false, fmt.Errorf("failed to save resized image: %w", err)
+		}
+
+		// 5. Add to cache
+		p.mutex.Lock()
+		p.cache[cacheKey] = ImageCache{
+			OriginalPath: originalPath,
+			CachedPath:   cachedPath,
+			CreatedAt:    time.Now(),
+		}
+		p.mutex.Unlock()
+
+		return cachedPath, true, nil
+	default:
+		// Start background resize
+		job := p.startBackgroundResize(originalPath, width, cacheKey)
+
+		// Check if it's already done
+		job.mutex.RLock()
+		if job.Done {
+			job.mutex.RUnlock()
+			if job.Error != nil {
+				return "", false, job.Error
+			}
+			return cachedPath, true, nil
+		}
+		job.mutex.RUnlock()
+
+		// Return original path and 429 status
+		return originalPath, false, fmt.Errorf("too many concurrent resizes")
 	}
-
-	// Check dimensions before acquiring semaphore
-	bounds := src.Bounds()
-	if width >= bounds.Dx() {
-		return originalPath, nil
-	}
-
-	// Only acquire semaphore when we actually need to resize
-	ctx := context.Background()
-	if err := p.resizeSemaphore.Acquire(ctx, 1); err != nil {
-		return "", fmt.Errorf("failed to acquire resize semaphore: %w", err)
-	}
-	defer p.resizeSemaphore.Release(1)
-
-	// Resize image maintaining aspect ratio
-	resized := imaging.Resize(src, width, 0, imaging.Lanczos)
-
-	// Save resized image
-	if err := imaging.Save(resized, cachedPath); err != nil {
-		return "", fmt.Errorf("failed to save resized image: %w", err)
-	}
-
-	// Store in cache
-	p.mutex.Lock()
-	p.cache[cacheKey] = ImageCache{
-		OriginalPath: originalPath,
-		CachedPath:   cachedPath,
-		CreatedAt:    time.Now(),
-	}
-	p.mutex.Unlock()
-
-	return cachedPath, nil
 }
 
 func ServeHugo(config Config, db *sql.DB) error {
@@ -300,8 +410,13 @@ func ServeHugo(config Config, db *sql.DB) error {
 		}
 
 		// Get resized or original image path
-		servedPath, err := imageProcessor.GetResizedImage(imgPath, width)
+		servedPath, _, err := imageProcessor.GetResizedImage(r.Context(), imgPath, width)
 		if err != nil {
+			if strings.Contains(err.Error(), "too many concurrent resizes") {
+				w.Header().Set("Retry-After", "5")
+				http.Error(w, "Image is being processed, please try again later", http.StatusTooManyRequests)
+				return
+			}
 			log.Printf("Error processing image: %v", err)
 			http.Error(w, "Failed to process image", http.StatusInternalServerError)
 			return
