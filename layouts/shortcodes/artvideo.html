@@ -1,0 +1,31 @@
+{{/* Generate a deterministic ID using MD5 of the video URL */}}
+{{ $url := .Get "url" }}
+{{ $id := .Get "id" }}
+{{ $title := .Get "title" }}
+<div id="{{ $id }}" class="artplayer-container">
+  <script>
+    document.addEventListener("DOMContentLoaded", function() {
+      var art = new Artplayer({
+        container: document.getElementById("{{ $id }}"),
+        url: {{ $url }},
+        title: {{ $title }},
+        autoplay: false,
+        pip: true,
+        autoSize: false,
+        volume: 0.7,
+        fullscreen: true,
+        gesture: true,
+        mutex: true,
+        playbackRate: true,
+      });
+
+    art.on('ready', () => {
+      art.autoHeight();
+    });
+
+    art.on('resize', () => {
+      art.autoHeight();
+    });
+  });
+  </script>
+</div>

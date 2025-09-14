@@ -1,0 +1,9 @@
+/* Artplayer wrapper to ensure visibility inside PaperMod posts */
+.artplayer-container {
+  width: 100%;
+  background: #000;
+  margin-bottom: 2rem;
+  aspect-ratio: 16/9;
+
+}
+

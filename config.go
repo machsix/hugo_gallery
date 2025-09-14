@@ -20,7 +20,6 @@ type Config struct {
 	Archetype                   string   // Path to the Hugo archetype template
 	ContentDir                  string   // Path to the Hugo content directory relative to HugoOutDir
 	Verbose                     bool     // Verbose logging
-	IdleSecond                  int      // Seconds to wait for folder to be idle before processing new files
 }
 
 func LoadConfig(path string) Config {
@@ -42,6 +41,5 @@ func LoadConfig(path string) Config {
 		Archetype:                   cfg.Section("main").Key("hugo_archetype").String(),
 		ContentDir:                  cfg.Section("main").Key("hugo_content_dir").MustString("content"),
 		Verbose:                     cfg.Section("main").Key("verbose").MustBool(false),
-		IdleSecond:                  cfg.Section("main").Key("idle_second").MustInt(10),
 	}
 }

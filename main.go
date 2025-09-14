@@ -53,7 +53,7 @@ func main() {
 	defer cleanupJieba()
 
 	// Create image processor
-	imageProcessor := NewImageProcessor(config.ImageCacheDir, config.ImageRoot, time.Duration(config.ImageCacheExpirationMinutes)*time.Minute, 5)
+	imageProcessor := NewImageProcessor(config.ImageCacheDir, config.ImageRoot, time.Duration(config.ImageCacheExpirationMinutes)*time.Minute, 10)
 
 	// Initialize and start server and folder watcher
 	go ServeHugo(config, imageProcessor, db)

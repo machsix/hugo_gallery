@@ -5,10 +5,10 @@ tags: [{{ range $i, $cat := .Tags }}{{ if $i }}, {{ end }}"{{ $cat }}"{{ end }}]
 type: "post"      # or omit; default is usually "post" or "page"
 ---
 
-
-{{ range .Videos }}
-{{ printf "<video src=\"/images/%s/%s\" controls title=\"%s\" preload=\"metadata\" style=\"max-width:100%%\"></video>" $.FolderSHA (urlquery .) (html .)}}
-
+{{ range $index, $video := .Videos }}
+  {{ $src := printf "/images/%s/%s" $.FolderSHA (urlquery $video) }}
+  {{ $id := printf "video-%d" $index }}
+  {{ printf "{{< artvideo id=\"%s\" url=\"%s\" title=\"%s\" style=\"max-width:100%%\">}}" $id $src (html $video) }}
 {{ end }}
 
 

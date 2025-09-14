@@ -48,7 +48,7 @@ func ServeHugo(config Config, imageProcessor *ImageProcessor, db *sql.DB) error 
 					}
 					if strings.Contains(err.Error(), "too many concurrent resizes") {
 						w.Header().Set("Retry-After", "5")
-						http.Error(w, "Server busy, try again later", http.StatusTooManyRequests)
+						http.Error(w, "Server busy, try again later", http.StatusAccepted)
 					} else {
 						http.Error(w, "Error processing image", http.StatusInternalServerError)
 					}

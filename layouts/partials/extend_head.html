@@ -1,4 +1,44 @@
 {{- /* Head custom content area start */ -}}
 {{- /*     Insert any custom code (web-analytics, resources, etc.) - it will appear in the <head></head> section of every page. */ -}}
 {{- /*     Can be overwritten by partial with the same name in the global layouts. */ -}}
+<head>
+<!-- <script src="https://unpkg.com/vconsole@latest/dist/vconsole.min.js"></script>
+<script>
+  // VConsole will be exported to `window.VConsole` by default.
+  var vConsole = new window.VConsole();
+</script> -->
+  <script defer>
+  function loadImageWithRetry(imgEl, url, interval = 3000) {
+  async function tryFetch() {
+    const res = await fetch(url, { cache: "no-store" });
+    if (res.status === 202) {
+      setTimeout(tryFetch, interval);
+      return;
+    }
+    if (res.ok) {
+      imgEl.src = url + "?t=" + Date.now();
+    }
+  }
+  tryFetch();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const img = entry.target;
+        loadImageWithRetry(img, img.dataset.originalSrc);
+        observer.unobserve(img); // only start once
+      }
+    });
+  });
+
+  document.querySelectorAll("img[data-original-src]").forEach(img => {
+    observer.observe(img);
+  });
+});
+  </script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.css" />
+<script src="https://cdn.jsdelivr.net/npm/artplayer/dist/artplayer.min.js"></script>
+</head>
 {{- /* Head custom content area end */ -}}

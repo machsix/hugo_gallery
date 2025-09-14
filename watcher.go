@@ -174,6 +174,7 @@ func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *t
 	// Use file stat directly instead of separate call
 	fileInfo, err := os.Stat(path)
 	date := time.Now()
+	// set date to folder mod time if available
 	if err == nil {
 		date = fileInfo.ModTime()
 	}
