@@ -43,6 +43,7 @@ func main() {
 		log.Println("SQLite DB does not exist. Running initial scan of folders to create markdowns and DB records.")
 		InitScanFolders(config, db, tmpl)
 	}
+	houseKeeping(config, db)
 
 	// Rebuild map from SQLite for image serving
 	folderMap = LoadFolderMap(db)
@@ -50,7 +51,6 @@ func main() {
 
 	// Build Hugo site after markdowns are ready
 	rebuildHugo(config)
-	defer cleanupJieba()
 
 	// Create image processor
 	imageProcessor := NewImageProcessor(config.ImageCacheDir, config.ImageRoot, time.Duration(config.ImageCacheExpirationMinutes)*time.Minute, 10)
@@ -61,6 +61,10 @@ func main() {
 
 	// Start image cache cleanup routine
 	imageProcessor.StartCleanupRoutine(time.Hour * 7 * 24)
+	startHouseKeeping(config, db, time.Minute*30)
+
+	// Defer cleanup
+	defer cleanupJieba()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)

@@ -71,12 +71,27 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
 				if !ok {
 					return
 				}
-				if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename) != 0 {
-					// Delay to ensure the dir is fully created before adding watchers
+				// Handle rename/move events specially
+				if event.Op&fsnotify.Rename != 0 {
+					// For renames, handle the deletion of old path
+					log.Printf("[DEBUG] Rename detected: %s", event.Name)
+					handleDeletedFolder(event.Name, config, db)
+
+					// Give the OS time to complete the rename
+					time.Sleep(100 * time.Millisecond)
+					go func() {
+						time.Sleep(time.Minute)
+						houseKeeping(config, db)
+						rebuildHugo(config)
+					}()
+				} else if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+					// Handle normal create/write events
 					go func(path string) {
 						info, err := os.Stat(path)
 						if err != nil {
-							log.Printf("Error stating %s: %v", path, err)
+							if !os.IsNotExist(err) {
+								log.Printf("Error stating %s: %v", path, err)
+							}
 							return
 						}
 
@@ -87,17 +102,6 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
 							addWatchersRecursive(path)
 							handleNewFolderWithTemplate(path, config, db, tmpl, true, nil, nil)
 						}
-						// else {
-						//   folder := filepath.Dir(path)
-						//   for _, ext := range exts {
-						//     if strings.HasSuffix(strings.ToLower(info.Name()), ext) {
-						//       log.Printf("Modified directory detected: %s", path)
-						//       handleNewFolderWithTemplate(folder, config, db, tmpl)
-						//       break
-						//     }
-						//   }
-						// }
-
 					}(event.Name)
 				}
 				if event.Op&fsnotify.Remove == fsnotify.Remove {
@@ -242,9 +246,15 @@ func handleDeletedFolder(path string, config Config, db *sql.DB) {
 	row := db.QueryRow("SELECT post_filename, category FROM posts WHERE folder_sha = ?", folderSHA)
 	row.Scan(&postFile, &category)
 	delete(folderMap, folderSHA)
-	if postFile != "" && category != "" {
-		postPath := filepath.Join(config.ContentDir, category, postFile)
-		os.Remove(postPath)
+	postPath := filepath.Join(config.ContentDir, "post", postFile)
+	// check if file exists before removing
+	if postFile != "" {
+		if _, err := os.Stat(postPath); err == nil {
+			log.Printf("[DEBUG] Removing post file: %s", postPath)
+			os.Remove(postPath)
+		} else {
+			log.Printf("[DEBUG] Post file %s does not exist, skipping removal.", postPath)
+		}
 		RemovePost(db, folderSHA)
 		rebuildHugo(config)
 	}
@@ -376,4 +386,72 @@ func cleanupJieba() {
 	if jiebaSingleton != nil {
 		jiebaSingleton.Free()
 	}
+}
+
+func houseKeeping(config Config, db *sql.DB) {
+	// Initialize the map
+	records := make(map[string]string)
+
+	rows, err := db.Query("SELECT folder_sha, rel_path FROM posts")
+	if err != nil {
+		log.Printf("Error querying posts: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	// Populate the map
+	for rows.Next() {
+		var postID, relPath string
+		if err := rows.Scan(&postID, &relPath); err != nil {
+			log.Printf("Error scanning row: %v", err)
+			continue
+		}
+		absPath := filepath.Join(config.WatchDir, relPath)
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			// folder does not exist, remove from db
+			log.Printf("Folder %s does not exist, removing from db", absPath)
+			err := RemovePost(db, postID)
+			if err != nil {
+				log.Printf("Error removing post %s: %v", postID, err)
+			}
+		} else {
+			records[postID] = relPath
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("Row iteration error: %v", err)
+		return
+	}
+
+	// Delete orphaned post files
+	postDir := filepath.Join(config.ContentDir, "post")
+	err = filepath.Walk(postDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("Error walking path %s: %v", path, err)
+			return nil
+		}
+		if info != nil && !info.IsDir() && strings.HasSuffix(info.Name(), ".md") {
+			postID := strings.TrimSuffix(info.Name(), ".md")
+			if _, exists := records[postID]; !exists {
+				// post_id not in db, delete the file
+				log.Printf("Removing orphaned post file: %s", path)
+				os.Remove(path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("Error walking post directory: %v", err)
+	}
+}
+
+func startHouseKeeping(config Config, db *sql.DB, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		for range ticker.C {
+			log.Println("Starting housekeeping...")
+			houseKeeping(config, db)
+			log.Println("Housekeeping completed.")
+		}
+	}()
 }
