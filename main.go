@@ -50,6 +50,7 @@ func main() {
 
 	// Build Hugo site after markdowns are ready
 	rebuildHugo(config)
+	defer cleanupJieba()
 
 	// Create image processor
 	imageProcessor := NewImageProcessor(config.ImageCacheDir, config.ImageRoot, time.Duration(config.ImageCacheExpirationMinutes)*time.Minute, 5)

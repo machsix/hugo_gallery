@@ -35,7 +35,7 @@ func ServeHugo(config Config, imageProcessor *ImageProcessor, db *sql.DB) error 
 		fileName, _ := url.QueryUnescape(file)
 		fileDir := GetRelPath(db, folderSHA)
 		relPath := filepath.Join(fileDir, fileName)
-		servedPath := filepath.Join(config.WatchDir, relPath)
+		servedPath := filepath.Join(config.ImageRoot, relPath)
 		fileExt := strings.ToLower(filepath.Ext(fileName))
 
 		for _, ext := range config.PhotoExts {

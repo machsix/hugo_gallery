@@ -61,8 +61,9 @@ func NewImageProcessor(cacheDir, resourceDir string, expiration time.Duration, m
 }
 
 func (ip *ImageProcessor) ProcessImage(srcRelPath string, width int) (string, error) {
+	srcPath := filepath.Join(ip.resourceDir, srcRelPath)
 	if width <= 0 {
-		return srcRelPath, nil
+		return srcPath, nil
 	}
 
 	cachedPath := cache_image_path(srcRelPath, ip.cacheDir, width)
@@ -116,12 +117,11 @@ func (ip *ImageProcessor) ProcessImage(srcRelPath string, width int) (string, er
 			ip.jobsMux.Unlock()
 		}()
 
-		return srcRelPath, fmt.Errorf("too many concurrent resizes")
+		return srcPath, fmt.Errorf("too many concurrent resizes")
 	}
 	defer func() { <-ip.jobSemaphore }()
 
 	// Process image immediately since we got a slot
-	srcPath := filepath.Join(ip.resourceDir, srcRelPath)
 
 	if err := ip.resizeImage(srcPath, cachedPath, width); err != nil {
 		job.Error = err

@@ -24,8 +24,10 @@ import (
 )
 
 var (
-	n_current int
-	mu        sync.Mutex
+	n_current      int
+	mu             sync.Mutex
+	jiebaSingleton *gojieba.Jieba
+	jiebaOnce      sync.Once
 )
 
 func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
@@ -83,7 +85,7 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
 								log.Printf("[DEBUG] New directory detected: %s", path)
 							}
 							addWatchersRecursive(path)
-							handleNewFolderWithTemplate(path, config, db, tmpl)
+							handleNewFolderWithTemplate(path, config, db, tmpl, true, nil, nil)
 						}
 						// else {
 						//   folder := filepath.Dir(path)
@@ -115,77 +117,77 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
 	wg.Wait()
 }
 
-func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *template.Template) {
+func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *template.Template, rebuild bool, images []string, videos []string) {
 	rel_path, err := filepath.Rel(config.WatchDir, path)
 	if err != nil {
 		log.Printf("Error getting relative path: %v", err)
 		return
 	}
-	idleThreshold := time.Duration(config.IdleSecond) * time.Second
-	var lastCount int
-	lastChange := time.Now()
 
-	for {
-		// Count number of files in the folder (non-recursive)
-		files, err := os.ReadDir(path)
-		if err != nil {
-			log.Printf("Error reading folder %s: %v", path, err)
-			return
-		}
-
-		count := len(files)
-		if count != lastCount {
-			lastCount = count
-			lastChange = time.Now()
-		}
-
-		// If no changes for idleThreshold, break
-		if time.Since(lastChange) >= idleThreshold {
-			if config.Verbose {
-				log.Printf("[DEBUG] Folder [%s] has %d files added", path, count)
-			}
-			break
-		}
-	}
-
-	images := listImages(path, config.PhotoExts)
-	videos := listImages(path, config.VideoExts)
-	if len(images)+len(videos) < 4 {
+	// Single directory scan
+	files, err := os.ReadDir(path)
+	if err != nil {
+		log.Printf("Error reading folder %s: %v", path, err)
 		return
 	}
+
+	// Process files in one pass
+	if len(images) == 0 {
+		images = make([]string, 0, len(files))
+		videos = make([]string, 0, len(files))
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			name := file.Name()
+			ext := strings.ToLower(filepath.Ext(name))
+
+			if isInSlice(ext, config.PhotoExts) {
+				images = append(images, name)
+			} else if isInSlice(ext, config.VideoExts) {
+				videos = append(videos, name)
+			}
+		}
+
+	}
+
+	totalFiles := len(images) + len(videos)
+
 	postname := filepath.Base(path)
 	categories := getCategories(rel_path)
 	tags := getTags(categories, postname)
 	folderSHA := sha1Hex(path)
 
 	postFile := folderSHA + ".md"
-	// postDir := filepath.Join(config.ContentDir, filepath.Join(categories...))
 	postDir := filepath.Join(config.ContentDir, "post")
 	postPath := filepath.Join(postDir, postFile)
+
 	if err := os.MkdirAll(postDir, 0755); err != nil {
 		log.Printf("Error creating post directory: %v", err)
 		return
 	}
 
+	// Use file stat directly instead of separate call
+	fileInfo, err := os.Stat(path)
 	date := time.Now()
-	{
-		info, err := os.Stat(path)
-		if err == nil {
-			date = info.ModTime()
-		}
+	if err == nil {
+		date = fileInfo.ModTime()
 	}
+
 	log.Printf("Generating post %s.md for %s", folderSHA, path)
-	mdContent := generateMarkdownWithTemplate(tmpl, images, videos, filepath.Base(path), folderSHA, tags, date)
-	err = os.WriteFile(postPath, []byte(mdContent), 0644)
-	if err != nil {
-		log.Println("Error writing markdown:", err)
+	mdContent := generateMarkdownWithTemplate(tmpl, images, videos, postname, folderSHA, tags, date)
+
+	if err := os.WriteFile(postPath, []byte(mdContent), 0644); err != nil {
+		log.Printf("Error writing markdown: %v", err)
 		return
 	}
-	nFile := len(images) + len(videos)
 
-	AddPost(db, folderSHA, postFile, strings.Join(categories, "/"), rel_path, nFile)
+	AddPost(db, folderSHA, postFile, strings.Join(categories, "/"), rel_path, totalFiles)
 	folderMap[folderSHA] = path
-	rebuildHugo(config)
+
+	if rebuild {
+		rebuildHugo(config)
+	}
 }
 
 func updatePost(db *sql.DB, path string, images []string, videos []string, config Config, tmpl *template.Template) {
@@ -269,18 +271,28 @@ func getCategories(rel string) []string {
 	return strings.Split(rel, string(os.PathSeparator))
 }
 
+// Get or create Jieba instance
+func getJieba() *gojieba.Jieba {
+	jiebaOnce.Do(func() {
+		jiebaSingleton = gojieba.NewJieba()
+		jiebaSingleton.AddWord("夏夏子")
+	})
+	return jiebaSingleton
+}
+
 func getTags(categories []string, postname string) []string {
 	filtered := make([]string, 0, len(categories))
 	for _, c := range categories {
-		if len(c) <= 8 && !strings.ContainsAny(c, " \t\n\r") {
+		if len(c) <= 20 && !strings.ContainsAny(c, " \t\n\r") {
 			filtered = append(filtered, c)
 		}
 	}
+
 	if utf8.RuneCountInString(postname) > 3 {
-		jb := gojieba.NewJieba()
-		jb.AddWord("夏夏子")
-		defer jb.Free()
+		jb := getJieba() // Use singleton instance
 		words := jb.Cut(postname, true)
+		// log.Printf("Jieba cut for %s: %v", postname, strings.Join(words, "/"))
+
 		asciiSymbols := `!"#$%&'()*+,-./:;<=>?@[\]^_{|}~`
 		reStartWithNumber := regexp.MustCompile(`^P?\d+V?`)
 		reStartWithPart := regexp.MustCompile(`^part`)
@@ -303,6 +315,17 @@ func getTags(categories []string, postname string) []string {
 			}
 		}
 	}
+	// log.Printf("Tags for %s: %v", postname, strings.Join(filtered, "/"))
+	// remove duplicates keeping order
+	seen := make(map[string]struct{}, len(filtered))
+	result := make([]string, 0, len(filtered))
+	for _, tag := range filtered {
+		if _, ok := seen[tag]; !ok {
+			seen[tag] = struct{}{}
+			result = append(result, tag)
+		}
+	}
+
 	return filtered
 }
 
@@ -335,4 +358,10 @@ func rebuildHugo(config Config) {
 		mu.Unlock()
 	}
 
+}
+
+func cleanupJieba() {
+	if jiebaSingleton != nil {
+		jiebaSingleton.Free()
+	}
 }
