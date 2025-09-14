@@ -48,7 +48,7 @@ func InitScanFolders(config Config, db *sql.DB, tmpl *template.Template) {
 				continue
 			}
 			folderSHA := sha1Hex(job.path)
-			existingPath := GetRealPath(db, folderSHA)
+			existingPath := GetRelPath(db, folderSHA)
 			newNFile := len(images) + len(videos)
 			nFile := GetNFile(db, folderSHA)
 			if existingPath != "" && nFile == newNFile {

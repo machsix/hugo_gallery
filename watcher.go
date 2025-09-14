@@ -9,27 +9,28 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
-  "text/template"
-  "unicode/utf8"
-  "regexp"
-  "time"
-   mapset "github.com/deckarep/golang-set/v2"
+	"text/template"
+	"time"
+	"unicode/utf8"
+
+	mapset "github.com/deckarep/golang-set/v2"
 
 	"github.com/fsnotify/fsnotify"
-  "github.com/yanyiwu/gojieba"
+	"github.com/yanyiwu/gojieba"
 )
 
 var (
 	n_current int
-	mu      sync.Mutex
+	mu        sync.Mutex
 )
 
-func WatchFolders(config Config, db *sql.DB, tmpl *template.Template ) {
+func WatchFolders(config Config, db *sql.DB, tmpl *template.Template) {
 	watcher, err := fsnotify.NewWatcher()
-  watched_folder := mapset.NewSet[string]()
+	watched_folder := mapset.NewSet[string]()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -38,14 +39,14 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template ) {
 
 	addWatchersRecursive := func(dir string) {
 		filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-      if err != nil {
-        log.Printf("WalkDir error on %s: %v", path, err)
-        return nil // continue walking
-      }
+			if err != nil {
+				log.Printf("WalkDir error on %s: %v", path, err)
+				return nil // continue walking
+			}
 			if d.IsDir() {
-        if watched_folder.Contains(path) {
-          return nil
-        }
+				if watched_folder.Contains(path) {
+					return nil
+				}
 				if err := watcher.Add(path); err != nil {
 					log.Printf("Failed to watch %s: %v", path, err)
 				} else {
@@ -56,9 +57,9 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template ) {
 		})
 	}
 
-  n_current = 0
+	n_current = 0
 	addWatchersRecursive(config.WatchDir)
-  // exts := append(config.PhotoExts, config.VideoExts...)
+	// exts := append(config.PhotoExts, config.VideoExts...)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -78,22 +79,22 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template ) {
 						}
 
 						if info.IsDir() {
-              if config.Verbose {
-  							log.Printf("[DEBUG] New directory detected: %s", path)
-              }
+							if config.Verbose {
+								log.Printf("[DEBUG] New directory detected: %s", path)
+							}
 							addWatchersRecursive(path)
 							handleNewFolderWithTemplate(path, config, db, tmpl)
-            }
-            // else {
-            //   folder := filepath.Dir(path)
-            //   for _, ext := range exts {
-            //     if strings.HasSuffix(strings.ToLower(info.Name()), ext) {
+						}
+						// else {
+						//   folder := filepath.Dir(path)
+						//   for _, ext := range exts {
+						//     if strings.HasSuffix(strings.ToLower(info.Name()), ext) {
 						//       log.Printf("Modified directory detected: %s", path)
-            //       handleNewFolderWithTemplate(folder, config, db, tmpl)
-            //       break
-            //     }
-            //   }
-            // }
+						//       handleNewFolderWithTemplate(folder, config, db, tmpl)
+						//       break
+						//     }
+						//   }
+						// }
 
 					}(event.Name)
 				}
@@ -114,9 +115,13 @@ func WatchFolders(config Config, db *sql.DB, tmpl *template.Template ) {
 	wg.Wait()
 }
 
-
 func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *template.Template) {
-  idleThreshold := time.Duration(config.IdleSecond) * time.Second
+	rel_path, err := filepath.Rel(config.WatchDir, path)
+	if err != nil {
+		log.Printf("Error getting relative path: %v", err)
+		return
+	}
+	idleThreshold := time.Duration(config.IdleSecond) * time.Second
 	var lastCount int
 	lastChange := time.Now()
 
@@ -136,21 +141,21 @@ func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *t
 
 		// If no changes for idleThreshold, break
 		if time.Since(lastChange) >= idleThreshold {
-      if config.Verbose {
-        log.Printf("[DEBUG] Folder [%s] has %d files added", path, count)
-      }
+			if config.Verbose {
+				log.Printf("[DEBUG] Folder [%s] has %d files added", path, count)
+			}
 			break
 		}
 	}
 
 	images := listImages(path, config.PhotoExts)
 	videos := listImages(path, config.VideoExts)
-	if len(images) + len(videos) < 4 {
+	if len(images)+len(videos) < 4 {
 		return
 	}
-  postname := filepath.Base(path)
-	categories := getCategories(config.WatchDir, path)
-  tags := getTags(categories, postname)
+	postname := filepath.Base(path)
+	categories := getCategories(rel_path)
+	tags := getTags(categories, postname)
 	folderSHA := sha1Hex(path)
 
 	postFile := folderSHA + ".md"
@@ -162,32 +167,34 @@ func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *t
 		return
 	}
 
-  date := time.Now()
-  {
-    info, err := os.Stat(path)
-    if err == nil {
-      date = info.ModTime()
-    }
-  }
-  log.Printf("Generating post %s.md for %s", folderSHA, path)
+	date := time.Now()
+	{
+		info, err := os.Stat(path)
+		if err == nil {
+			date = info.ModTime()
+		}
+	}
+	log.Printf("Generating post %s.md for %s", folderSHA, path)
 	mdContent := generateMarkdownWithTemplate(tmpl, images, videos, filepath.Base(path), folderSHA, tags, date)
-	err := os.WriteFile(postPath, []byte(mdContent), 0644)
+	err = os.WriteFile(postPath, []byte(mdContent), 0644)
 	if err != nil {
 		log.Println("Error writing markdown:", err)
 		return
 	}
-  nFile := len(images) + len(videos)
-	AddPost(db, folderSHA, postFile, strings.Join(categories, "/"), path, nFile)
+	nFile := len(images) + len(videos)
+
+	AddPost(db, folderSHA, postFile, strings.Join(categories, "/"), rel_path, nFile)
 	folderMap[folderSHA] = path
-  rebuildHugo(config)
+	rebuildHugo(config)
 }
 
-func updatePost(db *sql.DB, path string,images []string, videos []string, config Config, tmpl *template.Template) {
+func updatePost(db *sql.DB, path string, images []string, videos []string, config Config, tmpl *template.Template) {
 	folderSHA := sha1Hex(path)
-  newNFile := len(images) + len(images)
-	categories := getCategories(config.WatchDir, path)
-  postname := filepath.Base(path)
-  tags := getTags(categories, postname)
+	newNFile := len(images) + len(images)
+	rel_path, _ := filepath.Rel(config.WatchDir, path)
+	categories := getCategories(rel_path)
+	postname := filepath.Base(path)
+	tags := getTags(categories, postname)
 	postFile := folderSHA + ".md"
 	// postDir := filepath.Join(config.ContentDir, filepath.Join(categories...))
 	postDir := filepath.Join(config.ContentDir, "post")
@@ -197,16 +204,16 @@ func updatePost(db *sql.DB, path string,images []string, videos []string, config
 		return
 	}
 
-  date := time.Now()
-  {
-    info, err := os.Stat(path)
-    if err == nil {
-      date = info.ModTime()
-    }
-  }
+	date := time.Now()
+	{
+		info, err := os.Stat(path)
+		if err == nil {
+			date = info.ModTime()
+		}
+	}
 
-  UpdateNFile(db, folderSHA, path, newNFile)
-  mdContent := generateMarkdownWithTemplate(tmpl, images, videos, filepath.Base(path), folderSHA, tags, date)
+	UpdateNFile(db, folderSHA, path, newNFile)
+	mdContent := generateMarkdownWithTemplate(tmpl, images, videos, filepath.Base(path), folderSHA, tags, date)
 	err := os.WriteFile(postPath, []byte(mdContent), 0644)
 	if err != nil {
 		log.Println("Error writing markdown:", err)
@@ -254,8 +261,7 @@ func sha1Hex(s string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-func getCategories(root, folder string) []string {
-	rel, _ := filepath.Rel(root, folder)
+func getCategories(rel string) []string {
 	rel = filepath.Dir(rel)
 	if rel == "." || rel == "" {
 		return []string{}
@@ -263,71 +269,70 @@ func getCategories(root, folder string) []string {
 	return strings.Split(rel, string(os.PathSeparator))
 }
 
-func getTags(categories []string, postname string) [] string {
-    filtered := make([]string, 0, len(categories))
-    for _, c := range categories{
-        if len(c) <= 8 && !strings.ContainsAny(c, " \t\n\r") {
-            filtered = append(filtered, c)
-        }
-    }
-    if utf8.RuneCountInString(postname) > 3 {
-      jb := gojieba.NewJieba()
-      jb.AddWord("夏夏子")
-      defer jb.Free()
-      words := jb.Cut(postname, true)
-      asciiSymbols := `!"#$%&'()*+,-./:;<=>?@[\]^_{|}~`
-      reStartWithNumber := regexp.MustCompile(`^P?\d+V?`)
-      reStartWithPart := regexp.MustCompile(`^part`)
-      skipWords := []string{"MB", "GB", "作品", "写真", "写真集", "原创", "原創", "订阅"}
-      skipSet := make(map[string]struct{}, len(skipWords))
-      for _, w := range skipWords {
-        skipSet[w] = struct{}{}
-      }
-      for _, c := range words {
-        if _, skip := skipSet[c]; skip {
-          continue
-        }
-        if reStartWithNumber.MatchString(c) || reStartWithPart.MatchString(c) {
-          continue
-        }
-        if utf8.RuneCountInString(c) > 1 &&
-        !strings.ContainsAny(c, " []()\t\n\r") &&
-        !strings.ContainsAny(c, asciiSymbols)  {
-          filtered = append(filtered, c)
-        }
-      }
-    }
-    return filtered
+func getTags(categories []string, postname string) []string {
+	filtered := make([]string, 0, len(categories))
+	for _, c := range categories {
+		if len(c) <= 8 && !strings.ContainsAny(c, " \t\n\r") {
+			filtered = append(filtered, c)
+		}
+	}
+	if utf8.RuneCountInString(postname) > 3 {
+		jb := gojieba.NewJieba()
+		jb.AddWord("夏夏子")
+		defer jb.Free()
+		words := jb.Cut(postname, true)
+		asciiSymbols := `!"#$%&'()*+,-./:;<=>?@[\]^_{|}~`
+		reStartWithNumber := regexp.MustCompile(`^P?\d+V?`)
+		reStartWithPart := regexp.MustCompile(`^part`)
+		skipWords := []string{"MB", "GB", "作品", "写真", "写真集", "原创", "原創", "订阅"}
+		skipSet := make(map[string]struct{}, len(skipWords))
+		for _, w := range skipWords {
+			skipSet[w] = struct{}{}
+		}
+		for _, c := range words {
+			if _, skip := skipSet[c]; skip {
+				continue
+			}
+			if reStartWithNumber.MatchString(c) || reStartWithPart.MatchString(c) {
+				continue
+			}
+			if utf8.RuneCountInString(c) > 1 &&
+				!strings.ContainsAny(c, " []()\t\n\r") &&
+				!strings.ContainsAny(c, asciiSymbols) {
+				filtered = append(filtered, c)
+			}
+		}
+	}
+	return filtered
 }
-
 
 func rebuildHugo(config Config) {
 	mu.Lock()
 	n_current++
-  my := n_current
+	my := n_current
 	mu.Unlock()
 
-  if my != 1 {
-    mu.Lock()
-    n_current--
-    mu.Unlock()
-  } else {
-    for {
-      mu.Lock()
-      if n_current <= 1 {
-        mu.Unlock()
-        break
-      }
-      mu.Unlock()
-      time.Sleep(5 * time.Second)
-    }
-    log.Printf("Start building at %v", time.Now())
-    cmd := exec.Command(config.HugoPath, "--source", ".", "--destination", config.HugoOutDir)
-  	cmd.Run()
+	if my != 1 {
+		mu.Lock()
+		n_current--
+		mu.Unlock()
+	} else {
+		for {
+			mu.Lock()
+			if n_current <= 1 {
+				mu.Unlock()
+				break
+			}
+			mu.Unlock()
+			time.Sleep(5 * time.Second)
+		}
+		log.Printf("Start building at %v", time.Now())
+		cmd := exec.Command(config.HugoPath, "--source", ".", "--destination", config.HugoOutDir)
+		cmd.Run()
 
-    mu.Lock()
-    n_current--
-    mu.Unlock()
-  }
+		mu.Lock()
+		n_current--
+		mu.Unlock()
+	}
 
 }

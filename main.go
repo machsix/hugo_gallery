@@ -51,8 +51,15 @@ func main() {
 	// Build Hugo site after markdowns are ready
 	rebuildHugo(config)
 
-	go ServeHugo(config, db)
+	// Create image processor
+	imageProcessor := NewImageProcessor(config.ImageCacheDir, config.ImageRoot, time.Duration(config.ImageCacheExpirationMinutes)*time.Minute, 5)
+
+	// Initialize and start server and folder watcher
+	go ServeHugo(config, imageProcessor, db)
 	go WatchFolders(config, db, tmpl)
+
+	// Start image cache cleanup routine
+	imageProcessor.StartCleanupRoutine(time.Hour * 7 * 24)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
