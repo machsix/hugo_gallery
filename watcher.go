@@ -152,6 +152,10 @@ func handleNewFolderWithTemplate(path string, config Config, db *sql.DB, tmpl *t
 	}
 
 	totalFiles := len(images) + len(videos)
+	if totalFiles == 0 {
+		log.Printf("No media files found in %s, skipping.", path)
+		return
+	}
 
 	postname := filepath.Base(path)
 	categories := getCategories(rel_path)
@@ -215,6 +219,13 @@ func updatePost(db *sql.DB, path string, images []string, videos []string, confi
 	}
 
 	UpdateNFile(db, folderSHA, path, newNFile)
+
+	if newNFile == 0 {
+		os.Remove(postPath)
+		RemovePost(db, folderSHA)
+		log.Printf("No media files left in %s, removed post and database record.", path)
+		return
+	}
 	mdContent := generateMarkdownWithTemplate(tmpl, images, videos, filepath.Base(path), folderSHA, tags, date)
 	err := os.WriteFile(postPath, []byte(mdContent), 0644)
 	if err != nil {
